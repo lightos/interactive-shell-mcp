@@ -39,6 +39,44 @@ npm start
 npm run dev
 ```
 
+## MCP Configuration
+
+To use this MCP server with Claude Desktop or VS Code, add the following configuration to your MCP settings file:
+
+### Claude Desktop
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows:
+
+```json
+{
+  "mcpServers": {
+    "Interactive Shell MCP": {
+      "command": "node",
+      "args": [
+        "/path/to/interactive-shell-mcp/dist/server.js"
+      ]
+    }
+  }
+}
+```
+
+### VS Code (Cursor)
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "Interactive Shell MCP": {
+      "command": "node",
+      "args": [
+        "/path/to/interactive-shell-mcp/dist/server.js"
+      ]
+    }
+  }
+}
+```
+
+Replace `/path/to/interactive-shell-mcp` with the actual path to your installation.
+
 ## Dependencies
 
 - `@modelcontextprotocol/sdk` - MCP SDK for building MCP servers
