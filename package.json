@@ -1,0 +1,24 @@
+{
+  "name": "interactive-shell-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for interactive shell sessions",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc && node dist/server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": ["mcp", "shell", "pty", "interactive"],
+  "author": "",
+  "license": "MIT"
+}
