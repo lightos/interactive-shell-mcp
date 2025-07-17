@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/lightos-interactive-shell-mcp-badge.png)](https://mseep.ai/app/lightos-interactive-shell-mcp)
+
 # Interactive Shell MCP
 
 MCP server that provides interactive shell session management with full terminal emulation support via node-pty
