@@ -26,6 +26,12 @@ build/
 
 # Claude-specific
 .claude/
+CLAUDE.md
+.claude.local.md
+
+# Review artifacts
+.codex-review/
+.coderabbit-results/
 
 # Logs
 logs/
