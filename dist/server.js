@@ -70,7 +70,7 @@ class InteractiveShellServer {
                 },
                 {
                     name: 'send_shell_input',
-                    description: 'Writes input to the PTY with newline if needed',
+                    description: 'Writes input to the PTY. By default appends a newline. Use raw mode for interactive prompts (arrow keys, space to toggle, etc.)',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -80,7 +80,12 @@ class InteractiveShellServer {
                             },
                             input: {
                                 type: 'string',
-                                description: 'The input to send to the shell',
+                                description: 'The input to send to the shell. In raw mode, use escape sequences like \\x1b[A (up), \\x1b[B (down), \\r (enter), space for toggle',
+                            },
+                            raw: {
+                                type: 'boolean',
+                                description: 'Send input exactly as-is without appending newline. Use for interactive selection prompts, arrow key navigation, etc.',
+                                default: false,
                             },
                         },
                         required: ['sessionId', 'input'],
@@ -142,7 +147,8 @@ class InteractiveShellServer {
                         if (!args || typeof args.sessionId !== 'string' || typeof args.input !== 'string') {
                             throw new Error('Invalid arguments for send_shell_input');
                         }
-                        return await this.sendShellInput(args.sessionId, args.input);
+                        const raw = typeof args.raw === 'boolean' ? args.raw : false;
+                        return await this.sendShellInput(args.sessionId, args.input, raw);
                     case 'read_shell_output':
                         if (!args || typeof args.sessionId !== 'string') {
                             throw new Error('Invalid arguments for read_shell_output');
@@ -186,7 +192,6 @@ class InteractiveShellServer {
             lastSnapshot: '',
             lastSnapshotTime: 0,
             totalBytesReceived: 0,
-            mode: 'streaming',
             maxBufferSize: DEFAULT_MAX_BUFFER_SIZE,
         };
         ptyProcess.onData((data) => {
@@ -200,31 +205,18 @@ class InteractiveShellServer {
             else {
                 session.outputBuffer += data;
             }
-            // Detect if this looks like a screen refresh (contains clear screen or cursor positioning)
-            const hasTerminalControls = data.includes('\x1b[H') || // Cursor home
-                data.includes('\x1b[2J') || // Clear screen
-                data.includes('\x1b[0;0H') || // Cursor to 0,0
-                data.includes('\x1b[?1049h') || // Alternate screen buffer on
-                data.includes('\x1b[?1049l') || // Alternate screen buffer off
-                data.includes('\x1b[?47h') || // Alternate screen on
-                data.includes('\x1b[?47l') || // Alternate screen off
-                data.includes('\x1b[1;1H') || // Cursor to 1,1
-                data.includes('\x1b[J') || // Clear from cursor down
-                data.includes('\x1b[0J') || // Clear from cursor down
-                data.includes('\x1b[1J') || // Clear from cursor up
-                data.includes('\x1b[3J') || // Clear entire screen and scrollback
-                /\x1b\[\d+;\d+H/.test(data) || // Cursor positioning
-                /\x1b\[\d+;\d+f/.test(data); // Cursor positioning (alternate)
-            if (hasTerminalControls || session.mode === 'snapshot') {
-                // Switch to or stay in snapshot mode for apps that refresh the screen
-                session.mode = 'snapshot';
-                const now = Date.now();
-                // Always update snapshot in snapshot mode, respecting rate limit
-                if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS) {
-                    // For snapshot mode, capture the recent buffer which should contain the full screen
-                    session.lastSnapshot = session.outputBuffer.slice(-DEFAULT_SNAPSHOT_SIZE);
-                    session.lastSnapshotTime = now;
-                }
+            // Track alternate screen buffer transitions to update sticky mode
+            if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) {
+                session.detectedOutputMode = 'snapshot';
+            }
+            else if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) {
+                session.detectedOutputMode = undefined;
+            }
+            // Always maintain the snapshot buffer so it's available when requested
+            const now = Date.now();
+            if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS) {
+                session.lastSnapshot = session.outputBuffer.slice(-DEFAULT_SNAPSHOT_SIZE);
+                session.lastSnapshotTime = now;
             }
         });
         ptyProcess.onExit(() => {
@@ -240,13 +232,18 @@ class InteractiveShellServer {
             ],
         };
     }
-    async sendShellInput(sessionId, input) {
+    async sendShellInput(sessionId, input, raw) {
         const session = this.sessions.get(sessionId);
         if (!session) {
             throw new Error(`Invalid session ID: ${sessionId}`);
         }
-        const inputWithNewline = input.endsWith('\n') ? input : input + '\n';
-        session.ptyProcess.write(inputWithNewline);
+        if (raw) {
+            session.ptyProcess.write(input);
+        }
+        else {
+            const inputWithNewline = input.endsWith('\n') ? input : input + '\n';
+            session.ptyProcess.write(inputWithNewline);
+        }
         return {
             content: [
                 {
@@ -256,13 +253,34 @@ class InteractiveShellServer {
             ],
         };
     }
+    detectOutputMode(session) {
+        const buf = session.outputBuffer;
+        // Check recent buffer for terminal control sequences indicating a full-screen app
+        const hasTerminalControls = buf.includes('\x1b[?1049h') || // Alternate screen buffer on
+            buf.includes('\x1b[?47h') || // Alternate screen on
+            buf.includes('\x1b[2J') || // Clear entire screen
+            buf.includes('\x1b[3J'); // Clear screen and scrollback
+        // Only auto-detect snapshot for strong signals (full-screen apps),
+        // not for minor cursor positioning used by selection prompts
+        return hasTerminalControls ? 'snapshot' : 'streaming';
+    }
     async readShellOutput(sessionId, mode, maxBytes, snapshotSize) {
         const session = this.sessions.get(sessionId);
         if (!session) {
             throw new Error(`Invalid session ID: ${sessionId}`);
         }
-        // Use session's detected mode if not explicitly specified
-        const outputMode = mode || session.mode;
+        // Mode resolution: explicit caller mode > sticky detected mode > fresh detection
+        let outputMode;
+        if (mode) {
+            outputMode = mode;
+        }
+        else if (session.detectedOutputMode) {
+            outputMode = session.detectedOutputMode;
+        }
+        else {
+            outputMode = this.detectOutputMode(session);
+            session.detectedOutputMode = outputMode;
+        }
         const byteLimit = Math.min(maxBytes || 102400, DEFAULT_MAX_BUFFER_SIZE);
         let output;
         let metadata = {
