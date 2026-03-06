@@ -59,7 +59,7 @@ class InteractiveShellServer {
         },
         {
           name: 'send_shell_input',
-          description: 'Writes input to the PTY. By default appends a newline. Use raw mode for interactive prompts (arrow keys, space to toggle, etc.)',
+          description: 'Writes input to the PTY. By default appends a carriage return. Use raw mode for interactive prompts (arrow keys, space to toggle, etc.)',
           inputSchema: {
             type: 'object',
             properties: {
@@ -73,7 +73,7 @@ class InteractiveShellServer {
               },
               raw: {
                 type: 'boolean',
-                description: 'Send input exactly as-is without appending newline. Use for interactive selection prompts, arrow key navigation, etc.',
+                description: 'Send input without appending newline. Interprets escape sequences (\\x1b, \\r, \\n, \\t, \\e). Use for interactive selection prompts, arrow key navigation, etc.',
                 default: false,
               },
             },
@@ -240,6 +240,28 @@ class InteractiveShellServer {
     };
   }
 
+  private parseEscapeSequences(input: string): string {
+    // Convert literal escape sequence strings to actual control characters.
+    // MCP clients often send "\\r" (backslash + r) instead of actual CR,
+    // "\\x1b" instead of actual ESC, etc.
+    //
+    // Uses a single-pass regex so that "\\\\" is matched atomically as an escaped
+    // backslash, preventing "\\\\x1b" from being misinterpreted as "\\<ESC>".
+    const escapePattern = /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\e|\\r|\\n|\\t|\\\\/g;
+    return input.replace(escapePattern, (match, xHex, uHex) => {
+      if (xHex) return String.fromCharCode(parseInt(xHex, 16));
+      if (uHex) return String.fromCharCode(parseInt(uHex, 16));
+      switch (match) {
+        case '\\e': return '\x1b';
+        case '\\r': return '\r';
+        case '\\n': return '\n';
+        case '\\t': return '\t';
+        case '\\\\': return '\\';
+        default: return match;
+      }
+    });
+  }
+
   private async sendShellInput(sessionId: string, input: string, raw?: boolean): Promise<any> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -247,10 +269,12 @@ class InteractiveShellServer {
     }
 
     if (raw) {
-      session.ptyProcess.write(input);
+      session.ptyProcess.write(this.parseEscapeSequences(input));
     } else {
-      const inputWithNewline = input.endsWith('\n') ? input : input + '\n';
-      session.ptyProcess.write(inputWithNewline);
+      // Append \r (carriage return) — what a real terminal sends for Enter.
+      // Interactive prompts in raw terminal mode (inquirer, clack, drizzle-kit) expect \r, not \n.
+      const inputWithReturn = input.endsWith('\r') || input.endsWith('\n') ? input : input + '\r';
+      session.ptyProcess.write(inputWithReturn);
     }
 
     return {

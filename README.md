@@ -36,15 +36,16 @@ Spawns a new PTY shell and returns a unique session ID.
 
 ### `send_shell_input`
 
-Writes input to the PTY. Appends a newline by default.
+Writes input to the PTY. Appends a carriage return by default.
 Set `raw: true` for interactive prompts (arrow keys, space
 to toggle, etc.).
 
 - **Input**:
   - `sessionId` (string): The session ID of the shell
   - `input` (string): The input to send to the shell
-  - `raw` (boolean, optional): Send input as-is without
-    appending newline
+  - `raw` (boolean, optional): Send input without appending
+    carriage return. Interprets escape sequences
+    (`\x1b`, `\r`, `\n`, `\t`, `\e`).
 - **Output**: Success confirmation
 
 ### `read_shell_output`
