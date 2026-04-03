@@ -9,7 +9,7 @@ import {
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
 import { Terminal } from '@xterm/headless';
-import { awaitWrite, clampDimensions } from './screen';
+import { readScreen, readScreenRegion, awaitWrite, clampDimensions } from './screen';
 
 const DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024; // 1MB default limit
 const SNAPSHOT_INTERVAL_MS = 100; // Minimum time between snapshots
@@ -53,18 +53,12 @@ class InteractiveShellServer {
       tools: [
         {
           name: 'start_shell_session',
-          description: 'Spawns a new PTY shell and returns a unique session ID',
+          description: 'Spawns a new PTY shell with a virtual terminal emulator and returns a unique session ID',
           inputSchema: {
             type: 'object',
             properties: {
-              cols: {
-                type: 'number',
-                description: 'Number of columns for the terminal (default: 120, max: 500)',
-              },
-              rows: {
-                type: 'number',
-                description: 'Number of rows for the terminal (default: 40, max: 200)',
-              },
+              cols: { type: 'number', description: 'Terminal columns (default: 120, max: 500)', default: 120 },
+              rows: { type: 'number', description: 'Terminal rows (default: 40, max: 200)', default: 40 },
             },
             required: [],
           },
@@ -94,7 +88,7 @@ class InteractiveShellServer {
         },
         {
           name: 'read_shell_output',
-          description: 'Returns output from the PTY process. Supports two modes: streaming (default) returns buffered output since last read, snapshot mode returns current terminal state',
+          description: 'Returns output from the PTY process. Supports three modes: streaming (default) returns buffered output since last read, snapshot mode returns current terminal state, screen mode returns the parsed virtual terminal screen',
           inputSchema: {
             type: 'object',
             properties: {
@@ -104,8 +98,8 @@ class InteractiveShellServer {
               },
               mode: {
                 type: 'string',
-                enum: ['streaming', 'snapshot'],
-                description: 'Output mode: streaming (default) for regular commands, snapshot for continuously updating apps like top/htop/airodump-ng',
+                enum: ['streaming', 'snapshot', 'screen'],
+                description: 'Output mode: streaming (default) for regular commands, snapshot for continuously updating apps like top/htop/airodump-ng, screen for parsed terminal screen contents',
                 default: 'streaming',
               },
               maxBytes: {
@@ -118,6 +112,50 @@ class InteractiveShellServer {
                 description: 'Size of the snapshot buffer to capture (default: 50KB)',
                 default: 50000,
               },
+              rows: {
+                type: 'number',
+                description: 'Start row for screen mode (0-based, inclusive)',
+              },
+              rowEnd: {
+                type: 'number',
+                description: 'End row for screen mode (exclusive)',
+              },
+              includeEmpty: {
+                type: 'boolean',
+                description: 'Include empty trailing lines in screen mode output (default: true)',
+                default: true,
+              },
+              trimWhitespace: {
+                type: 'boolean',
+                description: 'Trim trailing whitespace from each line in screen mode (default: false)',
+                default: false,
+              },
+            },
+            required: ['sessionId'],
+          },
+        },
+        {
+          name: 'get_screen_region',
+          description: 'Extracts text from a rectangular region of the terminal screen. Coordinates are 0-based, end values are exclusive.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              sessionId: { type: 'string', description: 'The session ID of the shell' },
+              startRow: { type: 'number', description: 'Start row (0-based, inclusive)' },
+              startCol: { type: 'number', description: 'Start column (0-based, inclusive)' },
+              endRow: { type: 'number', description: 'End row (exclusive)' },
+              endCol: { type: 'number', description: 'End column (exclusive)' },
+            },
+            required: ['sessionId', 'startRow', 'startCol', 'endRow', 'endCol'],
+          },
+        },
+        {
+          name: 'get_screen_cursor',
+          description: 'Returns the current cursor position and the text of the line the cursor is on. Lightweight alternative to reading the full screen.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              sessionId: { type: 'string', description: 'The session ID of the shell' },
             },
             required: ['sessionId'],
           },
@@ -163,10 +201,24 @@ class InteractiveShellServer {
             }
             return await this.readShellOutput(
               args.sessionId,
-              args.mode as 'streaming' | 'snapshot' | undefined,
+              args.mode as 'streaming' | 'snapshot' | 'screen' | undefined,
               args.maxBytes as number | undefined,
-              args.snapshotSize as number | undefined
+              args.snapshotSize as number | undefined,
+              args.rows as number | undefined,
+              args.rowEnd as number | undefined,
+              args.includeEmpty as boolean | undefined,
+              args.trimWhitespace as boolean | undefined
             );
+
+          case 'get_screen_region':
+            if (!args || typeof args.sessionId !== 'string' || typeof args.startRow !== 'number' || typeof args.startCol !== 'number' || typeof args.endRow !== 'number' || typeof args.endCol !== 'number') {
+              throw new Error('Invalid arguments for get_screen_region');
+            }
+            return await this.getScreenRegion(args.sessionId, args.startRow, args.startCol, args.endRow, args.endCol);
+
+          case 'get_screen_cursor':
+            if (!args || typeof args.sessionId !== 'string') throw new Error('Invalid arguments for get_screen_cursor');
+            return await this.getScreenCursor(args.sessionId);
 
           case 'end_shell_session':
             if (!args || typeof args.sessionId !== 'string') {
@@ -320,30 +372,49 @@ class InteractiveShellServer {
 
   private async readShellOutput(
     sessionId: string,
-    mode?: 'streaming' | 'snapshot',
+    mode?: 'streaming' | 'snapshot' | 'screen',
     maxBytes?: number,
-    snapshotSize?: number
+    snapshotSize?: number,
+    startRow?: number,
+    rowEnd?: number,
+    includeEmpty?: boolean,
+    trimWhitespace?: boolean
   ): Promise<any> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Invalid session ID: ${sessionId}`);
     }
 
-    let outputMode: 'streaming' | 'snapshot';
+    let outputMode: 'streaming' | 'snapshot' | 'screen';
     if (mode) {
       outputMode = mode;
     } else {
       outputMode = this.detectOutputMode(session);
     }
     const byteLimit = Math.min(maxBytes || 102400, DEFAULT_MAX_BUFFER_SIZE);
-    
+
     let output: string;
     let metadata: any = {
       mode: outputMode,
       totalBytesReceived: session.totalBytesReceived,
     };
 
-    if (outputMode === 'snapshot') {
+    if (outputMode === 'screen') {
+      await session.lastWritePromise;
+      const isAlternateBuffer =
+        session.terminal.buffer.active === session.terminal.buffer.alternate;
+      const buf = session.terminal.buffer.active;
+      output = readScreen(session.terminal, {
+        startRow: startRow,
+        endRow: rowEnd,
+        trimWhitespace: typeof trimWhitespace === 'boolean' ? trimWhitespace : false,
+        includeEmpty: typeof includeEmpty === 'boolean' ? includeEmpty : true,
+      });
+      metadata.cursor = { x: buf.cursorX, y: buf.cursorY };
+      metadata.rows = session.terminal.rows;
+      metadata.cols = session.terminal.cols;
+      metadata.isAlternateBuffer = isAlternateBuffer;
+    } else if (outputMode === 'snapshot') {
       // In snapshot mode, check if we need to update the snapshot
       const now = Date.now();
       if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS || !session.lastSnapshot) {
@@ -382,6 +453,29 @@ class InteractiveShellServer {
           }),
         },
       ],
+    };
+  }
+
+  private async getScreenRegion(sessionId: string, startRow: number, startCol: number, endRow: number, endCol: number): Promise<any> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Invalid session ID: ${sessionId}`);
+    await session.lastWritePromise;
+    const output = readScreenRegion(session.terminal, startRow, startCol, endRow, endCol);
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ output, region: { startRow, startCol, endRow, endCol } }) }],
+    };
+  }
+
+  private async getScreenCursor(sessionId: string): Promise<any> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Invalid session ID: ${sessionId}`);
+    await session.lastWritePromise;
+    const buf = session.terminal.buffer.active;
+    const cursorLine = buf.getLine(buf.viewportY + buf.cursorY);
+    const currentLine = cursorLine ? cursorLine.translateToString(true) : '';
+    const isAlternateBuffer = session.terminal.buffer.active === session.terminal.buffer.alternate;
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ cursor: { x: buf.cursorX, y: buf.cursorY }, currentLine, isAlternateBuffer }) }],
     };
   }
 
