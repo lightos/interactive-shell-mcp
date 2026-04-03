@@ -2,15 +2,17 @@
   "name": "interactive-shell-mcp",
   "version": "1.0.0",
   "description": "MCP server for interactive shell sessions",
-  "main": "dist/server.js",
+  "main": "dist/src/server.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/server.js",
-    "dev": "tsc && node dist/server.js"
+    "start": "node dist/src/server.js",
+    "dev": "tsc && node dist/src/server.js",
+    "test": "node --test dist/tests/**/*.test.js"
   },
   "dependencies": {
-    "node-pty": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@xterm/headless": "^6.0.0",
+    "node-pty": "^1.0.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
