@@ -112,7 +112,7 @@ on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows:
     "Interactive Shell MCP": {
       "command": "node",
       "args": [
-        "/path/to/interactive-shell-mcp/dist/server.js"
+        "/path/to/interactive-shell-mcp/dist/src/server.js"
       ]
     }
   }
@@ -129,7 +129,7 @@ Add to `~/.cursor/mcp.json`:
     "Interactive Shell MCP": {
       "command": "node",
       "args": [
-        "/path/to/interactive-shell-mcp/dist/server.js"
+        "/path/to/interactive-shell-mcp/dist/src/server.js"
       ]
     }
   }

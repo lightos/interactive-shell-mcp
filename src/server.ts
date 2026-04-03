@@ -389,6 +389,9 @@ class InteractiveShellServer {
     if (mode) {
       outputMode = mode;
     } else {
+      // Await pending xterm writes so detectOutputMode sees up-to-date
+      // buffer state (e.g. alternate screen flag) before classifying.
+      await session.lastWritePromise;
       outputMode = this.detectOutputMode(session);
     }
     const byteLimit = Math.min(maxBytes || 102400, DEFAULT_MAX_BUFFER_SIZE);

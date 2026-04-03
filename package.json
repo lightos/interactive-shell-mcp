@@ -7,7 +7,9 @@
     "build": "tsc",
     "start": "node dist/src/server.js",
     "dev": "tsc && node dist/src/server.js",
-    "test": "node --test dist/tests/**/*.test.js"
+    "test": "node --test dist/tests/screen.test.js",
+    "test:integration": "node --test dist/tests/integration.test.js",
+    "test:all": "node --test dist/tests/**/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
