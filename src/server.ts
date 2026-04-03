@@ -8,6 +8,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
+import { Terminal } from '@xterm/headless';
+import { awaitWrite, clampDimensions } from './screen';
 
 const DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024; // 1MB default limit
 const SNAPSHOT_INTERVAL_MS = 100; // Minimum time between snapshots
@@ -21,7 +23,8 @@ interface ShellSession {
   lastSnapshotTime: number;
   totalBytesReceived: number;
   maxBufferSize: number;
-  detectedOutputMode?: 'streaming' | 'snapshot';
+  terminal: Terminal;
+  lastWritePromise: Promise<void>;
 }
 
 class InteractiveShellServer {
@@ -53,7 +56,16 @@ class InteractiveShellServer {
           description: 'Spawns a new PTY shell and returns a unique session ID',
           inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+              cols: {
+                type: 'number',
+                description: 'Number of columns for the terminal (default: 120, max: 500)',
+              },
+              rows: {
+                type: 'number',
+                description: 'Number of rows for the terminal (default: 40, max: 200)',
+              },
+            },
             required: [],
           },
         },
@@ -133,7 +145,10 @@ class InteractiveShellServer {
 
         switch (name) {
           case 'start_shell_session':
-            return await this.startShellSession();
+            return await this.startShellSession(
+              args?.cols as number | undefined,
+              args?.rows as number | undefined
+            );
 
           case 'send_shell_input':
             if (!args || typeof args.sessionId !== 'string' || typeof args.input !== 'string') {
@@ -176,15 +191,23 @@ class InteractiveShellServer {
     });
   }
 
-  private async startShellSession(): Promise<any> {
+  private async startShellSession(cols?: number, rows?: number): Promise<any> {
     const sessionId = uuidv4();
-    
+    const dims = clampDimensions(cols, rows);
+
     const ptyProcess = pty.spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
       name: 'xterm-color',
-      cols: 120,
-      rows: 40,
+      cols: dims.cols,
+      rows: dims.rows,
       cwd: process.cwd(),
       env: process.env,
+    });
+
+    const terminal = new Terminal({
+      cols: dims.cols,
+      rows: dims.rows,
+      scrollback: 1000,
+      allowProposedApi: true,
     });
 
     const session: ShellSession = {
@@ -195,48 +218,43 @@ class InteractiveShellServer {
       lastSnapshotTime: 0,
       totalBytesReceived: 0,
       maxBufferSize: DEFAULT_MAX_BUFFER_SIZE,
+      terminal,
+      lastWritePromise: Promise.resolve(),
     };
 
     ptyProcess.onData((data) => {
       session.totalBytesReceived += data.length;
-      
-      // Always append to buffer first
+
+      // Raw buffer (existing behavior)
       if (session.outputBuffer.length + data.length > session.maxBufferSize) {
-        // Calculate exact amount to keep to stay within limit
         const keepSize = session.maxBufferSize - data.length;
         session.outputBuffer = session.outputBuffer.slice(-keepSize) + data;
       } else {
         session.outputBuffer += data;
       }
-      
-      // Track alternate screen buffer transitions to update sticky mode
-      if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) {
-        session.detectedOutputMode = 'snapshot';
-      } else if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) {
-        session.detectedOutputMode = undefined;
-      }
 
-      // Always maintain the snapshot buffer so it's available when requested
+      // Snapshot buffer (existing behavior)
       const now = Date.now();
       if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS) {
         session.lastSnapshot = session.outputBuffer.slice(-DEFAULT_SNAPSHOT_SIZE);
         session.lastSnapshotTime = now;
       }
+
+      // Feed xterm terminal (new)
+      session.lastWritePromise = awaitWrite(terminal, data);
     });
 
     ptyProcess.onExit(() => {
-      this.sessions.delete(sessionId);
+      this.disposeSession(sessionId);
     });
 
     this.sessions.set(sessionId, session);
 
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ sessionId }),
-        },
-      ],
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ sessionId, cols: dims.cols, rows: dims.rows }),
+      }],
     };
   }
 
@@ -288,17 +306,16 @@ class InteractiveShellServer {
   }
 
   private detectOutputMode(session: ShellSession): 'streaming' | 'snapshot' {
-    const buf = session.outputBuffer;
-    // Check recent buffer for terminal control sequences indicating a full-screen app
-    const hasTerminalControls =
-      buf.includes('\x1b[?1049h') ||     // Alternate screen buffer on
-      buf.includes('\x1b[?47h') ||       // Alternate screen on
-      buf.includes('\x1b[2J') ||         // Clear entire screen
-      buf.includes('\x1b[3J');           // Clear screen and scrollback
-
-    // Only auto-detect snapshot for strong signals (full-screen apps),
-    // not for minor cursor positioning used by selection prompts
-    return hasTerminalControls ? 'snapshot' : 'streaming';
+    const isAlternateBuffer =
+      session.terminal.buffer.active === session.terminal.buffer.alternate;
+    if (isAlternateBuffer) {
+      return 'snapshot';
+    }
+    const recentOutput = session.outputBuffer.slice(-4096);
+    const hasScreenClears =
+      recentOutput.includes('\x1b[2J') ||
+      recentOutput.includes('\x1b[3J');
+    return hasScreenClears ? 'snapshot' : 'streaming';
   }
 
   private async readShellOutput(
@@ -312,15 +329,11 @@ class InteractiveShellServer {
       throw new Error(`Invalid session ID: ${sessionId}`);
     }
 
-    // Mode resolution: explicit caller mode > sticky detected mode > fresh detection
     let outputMode: 'streaming' | 'snapshot';
     if (mode) {
       outputMode = mode;
-    } else if (session.detectedOutputMode) {
-      outputMode = session.detectedOutputMode;
     } else {
       outputMode = this.detectOutputMode(session);
-      session.detectedOutputMode = outputMode;
     }
     const byteLimit = Math.min(maxBytes || 102400, DEFAULT_MAX_BUFFER_SIZE);
     
@@ -372,22 +385,21 @@ class InteractiveShellServer {
     };
   }
 
-  private async endShellSession(sessionId: string): Promise<any> {
+  private disposeSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session) {
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    try { session.terminal.dispose(); } catch (_) {}
+    try { session.ptyProcess.kill(); } catch (_) {}
+  }
+
+  private async endShellSession(sessionId: string): Promise<any> {
+    if (!this.sessions.has(sessionId)) {
       throw new Error(`Invalid session ID: ${sessionId}`);
     }
-
-    session.ptyProcess.kill();
-    this.sessions.delete(sessionId);
-
+    this.disposeSession(sessionId);
     return {
-      content: [
-        {
-          type: 'text',
-          text: 'Session ended successfully',
-        },
-      ],
+      content: [{ type: 'text', text: 'Session ended successfully' }],
     };
   }
 
@@ -408,14 +420,9 @@ class InteractiveShellServer {
   }
 
   private async cleanup(): Promise<void> {
-    for (const session of this.sessions.values()) {
-      try {
-        session.ptyProcess.kill();
-      } catch (error) {
-        console.error('Error killing PTY process:', error);
-      }
+    for (const sessionId of [...this.sessions.keys()]) {
+      this.disposeSession(sessionId);
     }
-    this.sessions.clear();
   }
 
   async run(): Promise<void> {
