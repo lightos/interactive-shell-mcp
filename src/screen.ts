@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/headless';
+import { DEFAULT_COLS, DEFAULT_ROWS, MAX_COLS, MAX_ROWS, isValidDimension } from './config';
 
 export function awaitWrite(terminal: Terminal, data: string): Promise<void> {
   return new Promise((resolve) => terminal.write(data, resolve));
@@ -129,15 +130,6 @@ export function searchScreen(terminal: Terminal, pattern: string, isRegex?: bool
     }
   }
   return results;
-}
-
-const DEFAULT_COLS = 120;
-const DEFAULT_ROWS = 40;
-const MAX_COLS = 500;
-const MAX_ROWS = 200;
-
-function isValidDimension(n: number): boolean {
-  return Number.isInteger(n) && n >= 1;
 }
 
 export function clampDimensions(cols?: number, rows?: number): { cols: number; rows: number } {
