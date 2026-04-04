@@ -77,3 +77,6 @@ temp/
 
 # Worktrees
 .worktrees/
+
+# Internal planning artifacts
+docs/superpowers/
