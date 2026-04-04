@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert';
 import { Terminal } from '@xterm/headless';
-import { readScreen, readScreenRegion, awaitWrite, clampDimensions, validateRegion } from '../src/screen.js';
+import { readScreen, readScreenRegion, awaitWrite, clampDimensions, validateRegion, searchScreen } from '../src/screen.js';
 
 describe('readScreen', () => {
   it('returns rendered text from terminal buffer', async () => {
@@ -152,6 +152,69 @@ describe('awaitWrite', () => {
     assert.ok(line);
     const text = line.translateToString(true);
     assert.ok(text.includes('test data'));
+    terminal.dispose();
+  });
+});
+
+describe('searchScreen', () => {
+  it('finds text with correct row and col', async () => {
+    const terminal = new Terminal({ cols: 40, rows: 5, allowProposedApi: true });
+    await awaitWrite(terminal, 'hello world\r\nfoo bar\r\n');
+    const results = searchScreen(terminal, 'bar');
+    assert.ok(results.length >= 1);
+    const match = results.find(r => r.text === 'bar');
+    assert.ok(match);
+    assert.strictEqual(match.col, 4);
+    terminal.dispose();
+  });
+
+  it('supports regex mode', async () => {
+    const terminal = new Terminal({ cols: 40, rows: 5, allowProposedApi: true });
+    await awaitWrite(terminal, 'abc 123 def 456\r\n');
+    const results = searchScreen(terminal, '\\d+', true);
+    assert.ok(results.length >= 2);
+    assert.strictEqual(results[0].text, '123');
+    assert.strictEqual(results[1].text, '456');
+    terminal.dispose();
+  });
+
+  it('returns empty results when pattern not found', async () => {
+    const terminal = new Terminal({ cols: 40, rows: 5, allowProposedApi: true });
+    await awaitWrite(terminal, 'hello world\r\n');
+    const results = searchScreen(terminal, 'notfound');
+    assert.strictEqual(results.length, 0);
+    terminal.dispose();
+  });
+
+  it('caps results at 50', async () => {
+    const terminal = new Terminal({ cols: 80, rows: 60, allowProposedApi: true });
+    // Write 'x' repeated many times across multiple lines
+    let data = '';
+    for (let i = 0; i < 55; i++) {
+      data += 'x\r\n';
+    }
+    await awaitWrite(terminal, data);
+    const results = searchScreen(terminal, 'x');
+    assert.ok(results.length <= 50);
+    terminal.dispose();
+  });
+
+  it('throws on invalid regex', () => {
+    const terminal = new Terminal({ cols: 40, rows: 5, allowProposedApi: true });
+    assert.throws(() => searchScreen(terminal, '[invalid', true), /Invalid regex pattern/);
+    terminal.dispose();
+  });
+});
+
+describe('readScreenRegion trimWhitespace', () => {
+  it('trims trailing whitespace when enabled', async () => {
+    const terminal = new Terminal({ cols: 20, rows: 5, allowProposedApi: true });
+    await awaitWrite(terminal, 'hi\r\n');
+    const untrimmed = readScreenRegion(terminal, 0, 0, 1, 20, false);
+    const trimmed = readScreenRegion(terminal, 0, 0, 1, 20, true);
+    assert.strictEqual(untrimmed.length, 20);
+    assert.ok(trimmed.length < untrimmed.length);
+    assert.ok(trimmed.includes('hi'));
     terminal.dispose();
   });
 });

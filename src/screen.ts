@@ -66,7 +66,8 @@ export function readScreenRegion(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  trimWhitespace?: boolean
 ): string {
   const region = validateRegion(terminal, startRow, startCol, endRow, endCol);
   const buffer = terminal.buffer.active;
@@ -75,10 +76,59 @@ export function readScreenRegion(
 
   for (let y = region.startRow; y < region.endRow; y++) {
     const line = buffer.getLine(viewportStart + y);
-    lines.push(line?.translateToString(false, region.startCol, region.endCol) ?? '');
+    lines.push(line?.translateToString(trimWhitespace ?? false, region.startCol, region.endCol) ?? '');
   }
 
   return lines.join('\n');
+}
+
+export interface SearchResult {
+  row: number;
+  col: number;
+  text: string;
+}
+
+const MAX_SEARCH_RESULTS = 50;
+const MAX_PATTERN_LENGTH = 200;
+
+export function searchScreen(terminal: Terminal, pattern: string, isRegex?: boolean): SearchResult[] {
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new Error(`Pattern too long: max ${MAX_PATTERN_LENGTH} characters`);
+  }
+
+  const buffer = terminal.buffer.active;
+  const viewportStart = buffer.viewportY;
+  const results: SearchResult[] = [];
+
+  let regex: RegExp | null = null;
+  if (isRegex) {
+    try {
+      regex = new RegExp(pattern, 'g');
+    } catch (e) {
+      throw new Error(`Invalid regex pattern: ${pattern}`);
+    }
+  }
+
+  for (let y = 0; y < terminal.rows && results.length < MAX_SEARCH_RESULTS; y++) {
+    const line = buffer.getLine(viewportStart + y);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (regex) {
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(text)) !== null && results.length < MAX_SEARCH_RESULTS) {
+        results.push({ row: y, col: match.index, text: match[0] });
+      }
+    } else {
+      let startIdx = 0;
+      let idx;
+      while ((idx = text.indexOf(pattern, startIdx)) !== -1 && results.length < MAX_SEARCH_RESULTS) {
+        results.push({ row: y, col: idx, text: pattern });
+        startIdx = idx + 1;
+      }
+    }
+  }
+  return results;
 }
 
 const DEFAULT_COLS = 120;

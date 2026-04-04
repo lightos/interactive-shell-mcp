@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert';
 import * as pty from 'node-pty';
 import { Terminal } from '@xterm/headless';
-import { readScreen, readScreenRegion, awaitWrite } from '../src/screen.js';
+import { readScreen, readScreenRegion, awaitWrite, searchScreen } from '../src/screen.js';
 
 describe('session lifecycle integration', () => {
   it('xterm terminal receives PTY output', async () => {
@@ -151,6 +151,103 @@ describe('region extraction with PTY', () => {
 
     const region = readScreenRegion(terminal, bbbbRow, 0, bbbbRow + 1, 4);
     assert.strictEqual(region, 'BBBB');
+    terminal.dispose();
+  });
+});
+
+describe('waitForIdle integration', () => {
+  it('waits for idle before reading output', async () => {
+    const terminal = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+    const ptyProcess = pty.spawn(shell, ['-c', 'sleep 0.1 && echo "delayed output"'], {
+      name: 'xterm-color',
+      cols: 80,
+      rows: 24,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+
+    let lastDataTime = Date.now();
+    let writePromise = Promise.resolve();
+    const done = new Promise<void>((resolve) => {
+      ptyProcess.onData((data) => {
+        lastDataTime = Date.now();
+        writePromise = awaitWrite(terminal, data);
+      });
+      ptyProcess.onExit(() => setTimeout(resolve, 200));
+    });
+
+    // Wait for idle (200ms of no data)
+    const idleMs = 200;
+    const startTime = Date.now();
+    while (Date.now() - lastDataTime < idleMs) {
+      if (Date.now() - startTime > 5000) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    await writePromise;
+
+    const screen = readScreen(terminal, { includeEmpty: false, trimWhitespace: true });
+    assert.ok(screen.includes('delayed output'), `Expected "delayed output" in:\n${screen}`);
+
+    await done;
+    terminal.dispose();
+  });
+});
+
+describe('searchScreen with PTY', () => {
+  it('finds text in PTY output', async () => {
+    const terminal = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+    const ptyProcess = pty.spawn(shell, ['-c', 'echo "findme_unique_string"'], {
+      name: 'xterm-color',
+      cols: 80,
+      rows: 24,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+
+    let writePromise = Promise.resolve();
+    await new Promise<void>((resolve) => {
+      ptyProcess.onData((data) => {
+        writePromise = awaitWrite(terminal, data);
+      });
+      ptyProcess.onExit(() => setTimeout(resolve, 200));
+    });
+    await writePromise;
+
+    const results = searchScreen(terminal, 'findme_unique_string');
+    assert.ok(results.length >= 1, 'Expected to find "findme_unique_string" in terminal');
+    assert.strictEqual(results[0].text, 'findme_unique_string');
+    terminal.dispose();
+  });
+});
+
+describe('resize with PTY', () => {
+  it('resizes terminal and pty', async () => {
+    const terminal = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+    const ptyProcess = pty.spawn(shell, [], {
+      name: 'xterm-color',
+      cols: 80,
+      rows: 24,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+
+    let writePromise = Promise.resolve();
+    ptyProcess.onData((data) => {
+      writePromise = awaitWrite(terminal, data);
+    });
+
+    await new Promise(r => setTimeout(r, 300));
+
+    ptyProcess.resize(120, 40);
+    terminal.resize(120, 40);
+
+    assert.strictEqual(terminal.cols, 120);
+    assert.strictEqual(terminal.rows, 40);
+
+    ptyProcess.kill();
     terminal.dispose();
   });
 });

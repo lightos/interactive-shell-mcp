@@ -9,11 +9,20 @@ import {
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
 import { Terminal } from '@xterm/headless';
-import { readScreen, readScreenRegion, awaitWrite, clampDimensions } from './screen';
+import { readScreen, readScreenRegion, awaitWrite, clampDimensions, searchScreen } from './screen';
 
 const DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024; // 1MB default limit
 const SNAPSHOT_INTERVAL_MS = 100; // Minimum time between snapshots
 const DEFAULT_SNAPSHOT_SIZE = 50000; // 50KB default snapshot size
+const SESSION_TIMEOUT_MS = 600_000;
+const MAX_WAIT_MS = 5000;
+const ALLOWED_SHELLS = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'powershell.exe', 'pwsh', 'cmd.exe']);
+
+function selectShell(shell?: string): string {
+  return shell && ALLOWED_SHELLS.has(shell)
+    ? shell
+    : (process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash'));
+}
 
 interface ShellSession {
   id: string;
@@ -25,11 +34,14 @@ interface ShellSession {
   maxBufferSize: number;
   terminal: Terminal;
   lastWritePromise: Promise<void>;
+  lastDataTime: number;
+  lastActivityTime: number;
 }
 
 class InteractiveShellServer {
   private server: Server;
   private sessions: Map<string, ShellSession> = new Map();
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.server = new Server(
@@ -46,6 +58,15 @@ class InteractiveShellServer {
 
     this.setupToolHandlers();
     this.setupErrorHandling();
+
+    this.cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [id, session] of this.sessions) {
+        if (now - session.lastActivityTime > SESSION_TIMEOUT_MS) {
+          this.disposeSession(id);
+        }
+      }
+    }, 60_000);
   }
 
   private setupToolHandlers(): void {
@@ -59,6 +80,7 @@ class InteractiveShellServer {
             properties: {
               cols: { type: 'number', description: 'Terminal columns (default: 120, max: 500)', default: 120 },
               rows: { type: 'number', description: 'Terminal rows (default: 40, max: 200)', default: 40 },
+              shell: { type: 'string', description: 'Shell to use (bash, zsh, fish, sh, dash, ksh, powershell.exe, pwsh, cmd.exe). Defaults to platform shell.' },
             },
             required: [],
           },
@@ -130,6 +152,10 @@ class InteractiveShellServer {
                 description: 'Trim trailing whitespace from each line in screen mode (default: false)',
                 default: false,
               },
+              waitForIdle: {
+                type: 'number',
+                description: 'Wait until no data has been received for this many milliseconds before reading (max: 5000ms)',
+              },
             },
             required: ['sessionId'],
           },
@@ -145,6 +171,7 @@ class InteractiveShellServer {
               startCol: { type: 'number', description: 'Start column (0-based, inclusive)' },
               endRow: { type: 'number', description: 'End row (exclusive)' },
               endCol: { type: 'number', description: 'End column (exclusive)' },
+              trimWhitespace: { type: 'boolean', description: 'Trim trailing whitespace from each line (default: false)', default: false },
             },
             required: ['sessionId', 'startRow', 'startCol', 'endRow', 'endCol'],
           },
@@ -158,6 +185,41 @@ class InteractiveShellServer {
               sessionId: { type: 'string', description: 'The session ID of the shell' },
             },
             required: ['sessionId'],
+          },
+        },
+        {
+          name: 'search_screen',
+          description: 'Search the terminal screen for text or regex pattern. Returns matching positions.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              sessionId: { type: 'string', description: 'The session ID of the shell' },
+              pattern: { type: 'string', description: 'Text or regex pattern to search for' },
+              regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default: false)', default: false },
+            },
+            required: ['sessionId', 'pattern'],
+          },
+        },
+        {
+          name: 'list_sessions',
+          description: 'List all active shell sessions with their metadata.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'resize_shell',
+          description: 'Resize the terminal of an active shell session.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              sessionId: { type: 'string', description: 'The session ID of the shell' },
+              cols: { type: 'number', description: 'New column count (1-500)' },
+              rows: { type: 'number', description: 'New row count (1-200)' },
+            },
+            required: ['sessionId', 'cols', 'rows'],
           },
         },
         {
@@ -185,7 +247,8 @@ class InteractiveShellServer {
           case 'start_shell_session':
             return await this.startShellSession(
               args?.cols as number | undefined,
-              args?.rows as number | undefined
+              args?.rows as number | undefined,
+              args?.shell as string | undefined
             );
 
           case 'send_shell_input': {
@@ -208,7 +271,8 @@ class InteractiveShellServer {
               args.rows as number | undefined,
               args.rowEnd as number | undefined,
               args.includeEmpty as boolean | undefined,
-              args.trimWhitespace as boolean | undefined
+              args.trimWhitespace as boolean | undefined,
+              args.waitForIdle as number | undefined
             );
 
           case 'get_screen_region':
@@ -222,11 +286,24 @@ class InteractiveShellServer {
             ) {
               throw new Error('Invalid arguments for get_screen_region');
             }
-            return await this.getScreenRegion(args.sessionId, args.startRow, args.startCol, args.endRow, args.endCol);
+            return await this.getScreenRegion(args.sessionId, args.startRow, args.startCol, args.endRow, args.endCol, args.trimWhitespace as boolean | undefined);
 
           case 'get_screen_cursor':
             if (!args || typeof args.sessionId !== 'string') throw new Error('Invalid arguments for get_screen_cursor');
             return await this.getScreenCursor(args.sessionId);
+
+          case 'search_screen':
+            if (!args || typeof args.sessionId !== 'string' || typeof args.pattern !== 'string')
+              throw new Error('Invalid arguments for search_screen');
+            return await this.searchScreenHandler(args.sessionId, args.pattern, args.regex as boolean | undefined);
+
+          case 'list_sessions':
+            return this.listSessions();
+
+          case 'resize_shell':
+            if (!args || typeof args.sessionId !== 'string' || typeof args.cols !== 'number' || typeof args.rows !== 'number')
+              throw new Error('Invalid arguments for resize_shell');
+            return await this.resizeShell(args.sessionId, args.cols, args.rows);
 
           case 'end_shell_session':
             if (!args || typeof args.sessionId !== 'string') {
@@ -251,11 +328,12 @@ class InteractiveShellServer {
     });
   }
 
-  private async startShellSession(cols?: number, rows?: number): Promise<any> {
+  private async startShellSession(cols?: number, rows?: number, shell?: string): Promise<any> {
     const sessionId = uuidv4();
     const dims = clampDimensions(cols, rows);
+    const shellCmd = selectShell(shell);
 
-    const ptyProcess = pty.spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
+    const ptyProcess = pty.spawn(shellCmd, [], {
       name: 'xterm-color',
       cols: dims.cols,
       rows: dims.rows,
@@ -280,9 +358,13 @@ class InteractiveShellServer {
       maxBufferSize: DEFAULT_MAX_BUFFER_SIZE,
       terminal,
       lastWritePromise: Promise.resolve(),
+      lastDataTime: Date.now(),
+      lastActivityTime: Date.now(),
     };
 
     ptyProcess.onData((data) => {
+      session.lastDataTime = Date.now();
+      session.lastActivityTime = Date.now();
       session.totalBytesReceived += data.length;
 
       if (session.outputBuffer.length + data.length > session.maxBufferSize) {
@@ -345,6 +427,8 @@ class InteractiveShellServer {
       throw new Error(`Invalid session ID: ${sessionId}`);
     }
 
+    session.lastActivityTime = Date.now();
+
     if (raw) {
       session.ptyProcess.write(this.parseEscapeSequences(input));
     } else {
@@ -381,11 +465,24 @@ class InteractiveShellServer {
     startRow?: number,
     rowEnd?: number,
     includeEmpty?: boolean,
-    trimWhitespace?: boolean
+    trimWhitespace?: boolean,
+    waitForIdle?: number
   ): Promise<any> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Invalid session ID: ${sessionId}`);
+    }
+
+    session.lastActivityTime = Date.now();
+
+    if (waitForIdle && waitForIdle > 0) {
+      const idleMs = Math.min(waitForIdle, MAX_WAIT_MS);
+      const startTime = Date.now();
+      while (Date.now() - session.lastDataTime < idleMs) {
+        if (Date.now() - startTime > MAX_WAIT_MS) break;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      await session.lastWritePromise;
     }
 
     let outputMode: 'streaming' | 'snapshot' | 'screen';
@@ -453,12 +550,13 @@ class InteractiveShellServer {
     startRow: number,
     startCol: number,
     endRow: number,
-    endCol: number
+    endCol: number,
+    trimWhitespace?: boolean
   ): Promise<any> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Invalid session ID: ${sessionId}`);
     await session.lastWritePromise;
-    const output = readScreenRegion(session.terminal, startRow, startCol, endRow, endCol);
+    const output = readScreenRegion(session.terminal, startRow, startCol, endRow, endCol, trimWhitespace);
     return {
       content: [
         {
@@ -485,6 +583,43 @@ class InteractiveShellServer {
         },
       ],
     };
+  }
+
+  private async searchScreenHandler(sessionId: string, pattern: string, regex?: boolean): Promise<any> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Invalid session ID: ${sessionId}`);
+    await session.lastWritePromise;
+    session.lastActivityTime = Date.now();
+    const results = searchScreen(session.terminal, pattern, regex);
+    return { content: [{ type: 'text', text: JSON.stringify({ results, count: results.length }) }] };
+  }
+
+  private listSessions(): any {
+    const sessions = [];
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      sessions.push({
+        sessionId: session.id,
+        cols: session.terminal.cols,
+        rows: session.terminal.rows,
+        isAlternateBuffer: session.terminal.buffer.active === session.terminal.buffer.alternate,
+        idleSeconds: Math.floor((now - session.lastActivityTime) / 1000),
+      });
+    }
+    return { content: [{ type: 'text', text: JSON.stringify({ sessions }) }] };
+  }
+
+  private async resizeShell(sessionId: string, cols: number, rows: number): Promise<any> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Invalid session ID: ${sessionId}`);
+    if (!Number.isInteger(cols) || cols < 1) throw new Error(`cols must be a positive integer, got ${cols}`);
+    if (!Number.isInteger(rows) || rows < 1) throw new Error(`rows must be a positive integer, got ${rows}`);
+    const c = Math.min(cols, 500);
+    const r = Math.min(rows, 200);
+    session.ptyProcess.resize(c, r);
+    session.terminal.resize(c, r);
+    session.lastActivityTime = Date.now();
+    return { content: [{ type: 'text', text: JSON.stringify({ cols: c, rows: r }) }] };
   }
 
   private disposeSession(sessionId: string): void {
@@ -527,6 +662,7 @@ class InteractiveShellServer {
   }
 
   private async cleanup(): Promise<void> {
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
     for (const sessionId of [...this.sessions.keys()]) {
       this.disposeSession(sessionId);
     }
