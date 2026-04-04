@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert';
 import * as pty from 'node-pty';
 import { Terminal } from '@xterm/headless';
-import { readScreen, readScreenRegion, awaitWrite } from '../src/screen';
+import { readScreen, readScreenRegion, awaitWrite } from '../src/screen.js';
 
 describe('session lifecycle integration', () => {
   it('xterm terminal receives PTY output', async () => {
@@ -16,9 +16,10 @@ describe('session lifecycle integration', () => {
       env: process.env,
     });
 
+    let writePromise = Promise.resolve();
     const done = new Promise<void>((resolve) => {
       ptyProcess.onData((data) => {
-        terminal.write(data, () => {});
+        writePromise = awaitWrite(terminal, data);
       });
       ptyProcess.onExit(() => {
         setTimeout(resolve, 200);
@@ -26,6 +27,7 @@ describe('session lifecycle integration', () => {
     });
 
     await done;
+    await writePromise;
 
     let found = false;
     const buf = terminal.buffer.active;
@@ -53,12 +55,14 @@ describe('screen mode with PTY', () => {
       env: process.env,
     });
 
+    let writePromise = Promise.resolve();
     await new Promise<void>((resolve) => {
       ptyProcess.onData((data) => {
-        terminal.write(data, () => {});
+        writePromise = awaitWrite(terminal, data);
       });
       ptyProcess.onExit(() => setTimeout(resolve, 200));
     });
+    await writePromise;
 
     const screen = readScreen(terminal, { includeEmpty: false, trimWhitespace: true });
     assert.ok(
@@ -125,12 +129,14 @@ describe('region extraction with PTY', () => {
       env: process.env,
     });
 
+    let writePromise = Promise.resolve();
     await new Promise<void>((resolve) => {
       ptyProcess.onData((data) => {
-        terminal.write(data, () => {});
+        writePromise = awaitWrite(terminal, data);
       });
       ptyProcess.onExit(() => setTimeout(resolve, 200));
     });
+    await writePromise;
 
     let bbbbRow = -1;
     const buf = terminal.buffer.active;

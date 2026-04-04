@@ -86,9 +86,11 @@ const DEFAULT_ROWS = 40;
 const MAX_COLS = 500;
 const MAX_ROWS = 200;
 
-export function clampDimensions(cols?: number, rows?: number): { cols: number; rows: number } {
-  const isValidDimension = (n: number) => Number.isInteger(n) && n >= 1;
+function isValidDimension(n: number): boolean {
+  return Number.isInteger(n) && n >= 1;
+}
 
+export function clampDimensions(cols?: number, rows?: number): { cols: number; rows: number } {
   return {
     cols: typeof cols === 'number' && isValidDimension(cols) ? Math.min(cols, MAX_COLS) : DEFAULT_COLS,
     rows: typeof rows === 'number' && isValidDimension(rows) ? Math.min(rows, MAX_ROWS) : DEFAULT_ROWS,

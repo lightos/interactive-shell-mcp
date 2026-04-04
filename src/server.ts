@@ -188,12 +188,13 @@ class InteractiveShellServer {
               args?.rows as number | undefined
             );
 
-          case 'send_shell_input':
+          case 'send_shell_input': {
             if (!args || typeof args.sessionId !== 'string' || typeof args.input !== 'string') {
               throw new Error('Invalid arguments for send_shell_input');
             }
             const raw = typeof args.raw === 'boolean' ? args.raw : false;
             return await this.sendShellInput(args.sessionId, args.input, raw);
+          }
 
           case 'read_shell_output':
             if (!args || typeof args.sessionId !== 'string') {
@@ -211,7 +212,14 @@ class InteractiveShellServer {
             );
 
           case 'get_screen_region':
-            if (!args || typeof args.sessionId !== 'string' || typeof args.startRow !== 'number' || typeof args.startCol !== 'number' || typeof args.endRow !== 'number' || typeof args.endCol !== 'number') {
+            if (
+              !args ||
+              typeof args.sessionId !== 'string' ||
+              typeof args.startRow !== 'number' ||
+              typeof args.startCol !== 'number' ||
+              typeof args.endRow !== 'number' ||
+              typeof args.endCol !== 'number'
+            ) {
               throw new Error('Invalid arguments for get_screen_region');
             }
             return await this.getScreenRegion(args.sessionId, args.startRow, args.startCol, args.endRow, args.endCol);
@@ -277,7 +285,6 @@ class InteractiveShellServer {
     ptyProcess.onData((data) => {
       session.totalBytesReceived += data.length;
 
-      // Raw buffer (existing behavior)
       if (session.outputBuffer.length + data.length > session.maxBufferSize) {
         const keepSize = session.maxBufferSize - data.length;
         session.outputBuffer = session.outputBuffer.slice(-keepSize) + data;
@@ -285,14 +292,12 @@ class InteractiveShellServer {
         session.outputBuffer += data;
       }
 
-      // Snapshot buffer (existing behavior)
       const now = Date.now();
       if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS) {
         session.lastSnapshot = session.outputBuffer.slice(-DEFAULT_SNAPSHOT_SIZE);
         session.lastSnapshotTime = now;
       }
 
-      // Feed xterm terminal (new)
       session.lastWritePromise = awaitWrite(terminal, data);
     });
 
@@ -303,10 +308,12 @@ class InteractiveShellServer {
     this.sessions.set(sessionId, session);
 
     return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({ sessionId, cols: dims.cols, rows: dims.rows }),
-      }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ sessionId, cols: dims.cols, rows: dims.rows }),
+        },
+      ],
     };
   }
 
@@ -358,15 +365,11 @@ class InteractiveShellServer {
   }
 
   private detectOutputMode(session: ShellSession): 'streaming' | 'snapshot' {
-    const isAlternateBuffer =
-      session.terminal.buffer.active === session.terminal.buffer.alternate;
-    if (isAlternateBuffer) {
+    if (session.terminal.buffer.active === session.terminal.buffer.alternate) {
       return 'snapshot';
     }
     const recentOutput = session.outputBuffer.slice(-4096);
-    const hasScreenClears =
-      recentOutput.includes('\x1b[2J') ||
-      recentOutput.includes('\x1b[3J');
+    const hasScreenClears = recentOutput.includes('\x1b[2J') || recentOutput.includes('\x1b[3J');
     return hasScreenClears ? 'snapshot' : 'streaming';
   }
 
@@ -404,11 +407,9 @@ class InteractiveShellServer {
 
     if (outputMode === 'screen') {
       await session.lastWritePromise;
-      const isAlternateBuffer =
-        session.terminal.buffer.active === session.terminal.buffer.alternate;
       const buf = session.terminal.buffer.active;
       output = readScreen(session.terminal, {
-        startRow: startRow,
+        startRow,
         endRow: rowEnd,
         trimWhitespace: typeof trimWhitespace === 'boolean' ? trimWhitespace : false,
         includeEmpty: typeof includeEmpty === 'boolean' ? includeEmpty : true,
@@ -416,33 +417,24 @@ class InteractiveShellServer {
       metadata.cursor = { x: buf.cursorX, y: buf.cursorY };
       metadata.rows = session.terminal.rows;
       metadata.cols = session.terminal.cols;
-      metadata.isAlternateBuffer = isAlternateBuffer;
+      metadata.isAlternateBuffer = buf === session.terminal.buffer.alternate;
     } else if (outputMode === 'snapshot') {
-      // In snapshot mode, check if we need to update the snapshot
       const now = Date.now();
       if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS || !session.lastSnapshot) {
-        // Update snapshot with current buffer content
         const snapSize = snapshotSize || DEFAULT_SNAPSHOT_SIZE;
         session.lastSnapshot = session.outputBuffer.slice(-snapSize);
         session.lastSnapshotTime = now;
       }
-      
       output = session.lastSnapshot;
       metadata.snapshotTime = session.lastSnapshotTime;
       metadata.isSnapshot = true;
-      
-      // Don't clear the buffer in snapshot mode
     } else {
-      // In streaming mode, return buffered output and clear it
       output = session.outputBuffer;
-      
-      // If output exceeds limit, return only the most recent data
       if (output.length > byteLimit) {
         output = output.slice(-byteLimit);
         metadata.truncated = true;
         metadata.originalSize = session.outputBuffer.length;
       }
-      
       session.outputBuffer = '';
     }
 
@@ -450,22 +442,30 @@ class InteractiveShellServer {
       content: [
         {
           type: 'text',
-          text: JSON.stringify({ 
-            output,
-            metadata 
-          }),
+          text: JSON.stringify({ output, metadata }),
         },
       ],
     };
   }
 
-  private async getScreenRegion(sessionId: string, startRow: number, startCol: number, endRow: number, endCol: number): Promise<any> {
+  private async getScreenRegion(
+    sessionId: string,
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number
+  ): Promise<any> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Invalid session ID: ${sessionId}`);
     await session.lastWritePromise;
     const output = readScreenRegion(session.terminal, startRow, startCol, endRow, endCol);
     return {
-      content: [{ type: 'text', text: JSON.stringify({ output, region: { startRow, startCol, endRow, endCol } }) }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ output, region: { startRow, startCol, endRow, endCol } }),
+        },
+      ],
     };
   }
 
@@ -476,9 +476,14 @@ class InteractiveShellServer {
     const buf = session.terminal.buffer.active;
     const cursorLine = buf.getLine(buf.viewportY + buf.cursorY);
     const currentLine = cursorLine ? cursorLine.translateToString(true) : '';
-    const isAlternateBuffer = session.terminal.buffer.active === session.terminal.buffer.alternate;
+    const isAlternateBuffer = buf === session.terminal.buffer.alternate;
     return {
-      content: [{ type: 'text', text: JSON.stringify({ cursor: { x: buf.cursorX, y: buf.cursorY }, currentLine, isAlternateBuffer }) }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ cursor: { x: buf.cursorX, y: buf.cursorY }, currentLine, isAlternateBuffer }),
+        },
+      ],
     };
   }
 
@@ -496,7 +501,12 @@ class InteractiveShellServer {
     }
     this.disposeSession(sessionId);
     return {
-      content: [{ type: 'text', text: 'Session ended successfully' }],
+      content: [
+        {
+          type: 'text',
+          text: 'Session ended successfully',
+        },
+      ],
     };
   }
 
