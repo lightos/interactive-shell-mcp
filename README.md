@@ -195,8 +195,11 @@ npm run build
 
 ## MCP Configuration
 
-To use this MCP server with Claude Desktop or VS Code, add the
-following configuration to your MCP settings file:
+### Claude Code (CLI)
+
+```bash
+claude mcp add interactive-shell node /path/to/interactive-shell-mcp/dist/src/server.js
+```
 
 ### Claude Desktop
 
