@@ -12,9 +12,9 @@ import { Terminal } from '@xterm/headless';
 import { readScreen, readScreenRegion, awaitWrite, clampDimensions, searchScreen } from './screen';
 import { SESSION_TIMEOUT_MS, MAX_WAIT_MS, MAX_COLS, MAX_ROWS, selectShell } from './config';
 
-const DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024; // 1MB default limit
-const SNAPSHOT_INTERVAL_MS = 100; // Minimum time between snapshots
-const DEFAULT_SNAPSHOT_SIZE = 50000; // 50KB default snapshot size
+const DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
+const SNAPSHOT_INTERVAL_MS = 100;
+const DEFAULT_SNAPSHOT_SIZE = 50000; // 50KB
 
 interface ShellSession {
   id: string;
@@ -288,23 +288,40 @@ class InteractiveShellServer {
             ) {
               throw new Error('Invalid arguments for get_screen_region');
             }
-            return await this.getScreenRegion(args.sessionId, args.startRow, args.startCol, args.endRow, args.endCol, args.trimWhitespace as boolean | undefined, args.waitForIdle as number | undefined);
+            return await this.getScreenRegion(
+              args.sessionId,
+              args.startRow,
+              args.startCol,
+              args.endRow,
+              args.endCol,
+              args.trimWhitespace as boolean | undefined,
+              args.waitForIdle as number | undefined
+            );
 
           case 'get_screen_cursor':
-            if (!args || typeof args.sessionId !== 'string') throw new Error('Invalid arguments for get_screen_cursor');
+            if (!args || typeof args.sessionId !== 'string') {
+              throw new Error('Invalid arguments for get_screen_cursor');
+            }
             return await this.getScreenCursor(args.sessionId, args.waitForIdle as number | undefined);
 
           case 'search_screen':
-            if (!args || typeof args.sessionId !== 'string' || typeof args.pattern !== 'string')
+            if (!args || typeof args.sessionId !== 'string' || typeof args.pattern !== 'string') {
               throw new Error('Invalid arguments for search_screen');
-            return await this.searchScreenHandler(args.sessionId, args.pattern, args.regex as boolean | undefined, args.waitForIdle as number | undefined);
+            }
+            return await this.searchScreenHandler(
+              args.sessionId,
+              args.pattern,
+              args.regex as boolean | undefined,
+              args.waitForIdle as number | undefined
+            );
 
           case 'list_sessions':
             return this.listSessions();
 
           case 'resize_shell':
-            if (!args || typeof args.sessionId !== 'string' || typeof args.cols !== 'number' || typeof args.rows !== 'number')
+            if (!args || typeof args.sessionId !== 'string' || typeof args.cols !== 'number' || typeof args.rows !== 'number') {
               throw new Error('Invalid arguments for resize_shell');
+            }
             return await this.resizeShell(args.sessionId, args.cols, args.rows);
 
           case 'end_shell_session':
@@ -330,7 +347,7 @@ class InteractiveShellServer {
     });
   }
 
-  private async startShellSession(cols?: number, rows?: number, shell?: string, cwd?: string): Promise<any> {
+  private async startShellSession(cols?: number, rows?: number, shell?: string, cwd?: string): Promise<object> {
     const sessionId = uuidv4();
     const dims = clampDimensions(cols, rows);
     const shellCmd = selectShell(shell);
@@ -371,8 +388,9 @@ class InteractiveShellServer {
     };
 
     ptyProcess.onData((data) => {
-      session.lastDataTime = Date.now();
-      session.lastActivityTime = Date.now();
+      const now = Date.now();
+      session.lastDataTime = now;
+      session.lastActivityTime = now;
       session.totalBytesReceived += data.length;
 
       if (session.outputBuffer.length + data.length > session.maxBufferSize) {
@@ -382,7 +400,6 @@ class InteractiveShellServer {
         session.outputBuffer += data;
       }
 
-      const now = Date.now();
       if (now - session.lastSnapshotTime >= SNAPSHOT_INTERVAL_MS) {
         session.lastSnapshot = session.outputBuffer.slice(-DEFAULT_SNAPSHOT_SIZE);
         session.lastSnapshotTime = now;
@@ -412,7 +429,9 @@ class InteractiveShellServer {
     const session = this.sessions.get(sessionId);
     if (session) return session;
     const exited = this.recentlyExited.get(sessionId);
-    if (exited) throw new Error(`Session exited with code ${exited.exitCode}${exited.signal ? ` (signal: ${exited.signal})` : ''}`);
+    if (exited) {
+      throw new Error(`Session exited with code ${exited.exitCode}${exited.signal ? ` (signal: ${exited.signal})` : ''}`);
+    }
     throw new Error(`Invalid session ID: ${sessionId}`);
   }
 
@@ -427,13 +446,9 @@ class InteractiveShellServer {
     await session.lastWritePromise;
   }
 
+  // Converts literal escape sequences sent by MCP clients (e.g. "\\r", "\\x1b[A")
+  // into actual control characters before writing to the PTY.
   private parseEscapeSequences(input: string): string {
-    // Convert literal escape sequence strings to actual control characters.
-    // MCP clients often send "\\r" (backslash + r) instead of actual CR,
-    // "\\x1b" instead of actual ESC, etc.
-    //
-    // Uses a single-pass regex so that "\\\\" is matched atomically as an escaped
-    // backslash, preventing "\\\\x1b" from being misinterpreted as "\\<ESC>".
     const escapePattern = /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\e|\\r|\\n|\\t|\\\\/g;
     return input.replace(escapePattern, (match, xHex, uHex) => {
       if (xHex) return String.fromCharCode(parseInt(xHex, 16));
@@ -449,16 +464,15 @@ class InteractiveShellServer {
     });
   }
 
-  private async sendShellInput(sessionId: string, input: string, raw?: boolean): Promise<any> {
+  private async sendShellInput(sessionId: string, input: string, raw?: boolean): Promise<object> {
     const session = this.getSession(sessionId);
-
     session.lastActivityTime = Date.now();
 
     if (raw) {
       session.ptyProcess.write(this.parseEscapeSequences(input));
     } else {
       // Append \r (carriage return) — what a real terminal sends for Enter.
-      // Interactive prompts in raw terminal mode (inquirer, clack, drizzle-kit) expect \r, not \n.
+      // Interactive prompts in raw terminal mode expect \r, not \n.
       const inputWithReturn = input.endsWith('\r') || input.endsWith('\n') ? input : input + '\r';
       session.ptyProcess.write(inputWithReturn);
     }
@@ -492,9 +506,8 @@ class InteractiveShellServer {
     includeEmpty?: boolean,
     trimWhitespace?: boolean,
     waitForIdle?: number
-  ): Promise<any> {
+  ): Promise<object> {
     const session = this.getSession(sessionId);
-
     session.lastActivityTime = Date.now();
 
     await this.waitForSessionIdle(session, waitForIdle);
@@ -508,13 +521,14 @@ class InteractiveShellServer {
       await session.lastWritePromise;
       outputMode = this.detectOutputMode(session);
     }
-    const byteLimit = Math.min(maxBytes || 102400, DEFAULT_MAX_BUFFER_SIZE);
 
-    let output: string;
-    let metadata: any = {
+    const byteLimit = Math.min(maxBytes || 102400, DEFAULT_MAX_BUFFER_SIZE);
+    const metadata: Record<string, unknown> = {
       mode: outputMode,
       totalBytesReceived: session.totalBytesReceived,
     };
+
+    let output: string;
 
     if (outputMode === 'screen') {
       await session.lastWritePromise;
@@ -567,8 +581,9 @@ class InteractiveShellServer {
     endCol: number,
     trimWhitespace?: boolean,
     waitForIdle?: number
-  ): Promise<any> {
+  ): Promise<object> {
     const session = this.getSession(sessionId);
+    session.lastActivityTime = Date.now();
     await this.waitForSessionIdle(session, waitForIdle);
     await session.lastWritePromise;
     const output = readScreenRegion(session.terminal, startRow, startCol, endRow, endCol, trimWhitespace);
@@ -582,8 +597,9 @@ class InteractiveShellServer {
     };
   }
 
-  private async getScreenCursor(sessionId: string, waitForIdle?: number): Promise<any> {
+  private async getScreenCursor(sessionId: string, waitForIdle?: number): Promise<object> {
     const session = this.getSession(sessionId);
+    session.lastActivityTime = Date.now();
     await this.waitForSessionIdle(session, waitForIdle);
     await session.lastWritePromise;
     const buf = session.terminal.buffer.active;
@@ -600,18 +616,25 @@ class InteractiveShellServer {
     };
   }
 
-  private async searchScreenHandler(sessionId: string, pattern: string, regex?: boolean, waitForIdle?: number): Promise<any> {
+  private async searchScreenHandler(sessionId: string, pattern: string, regex?: boolean, waitForIdle?: number): Promise<object> {
     const session = this.getSession(sessionId);
+    session.lastActivityTime = Date.now();
     await this.waitForSessionIdle(session, waitForIdle);
     await session.lastWritePromise;
-    session.lastActivityTime = Date.now();
     const results = searchScreen(session.terminal, pattern, regex);
-    return { content: [{ type: 'text', text: JSON.stringify({ results, count: results.length }) }] };
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ results, count: results.length }),
+        },
+      ],
+    };
   }
 
-  private listSessions(): any {
-    const sessions = [];
+  private listSessions(): object {
     const now = Date.now();
+    const sessions = [];
     for (const session of this.sessions.values()) {
       sessions.push({
         sessionId: session.id,
@@ -625,7 +648,7 @@ class InteractiveShellServer {
     return { content: [{ type: 'text', text: JSON.stringify({ sessions }) }] };
   }
 
-  private async resizeShell(sessionId: string, cols: number, rows: number): Promise<any> {
+  private async resizeShell(sessionId: string, cols: number, rows: number): Promise<object> {
     const session = this.getSession(sessionId);
     if (!Number.isInteger(cols) || cols < 1) throw new Error(`cols must be a positive integer, got ${cols}`);
     if (!Number.isInteger(rows) || rows < 1) throw new Error(`rows must be a positive integer, got ${rows}`);
@@ -645,7 +668,7 @@ class InteractiveShellServer {
     try { session.ptyProcess.kill(); } catch (_) {}
   }
 
-  private async endShellSession(sessionId: string): Promise<any> {
+  private async endShellSession(sessionId: string): Promise<object> {
     this.getSession(sessionId);
     this.disposeSession(sessionId);
     return {

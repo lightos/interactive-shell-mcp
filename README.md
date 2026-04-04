@@ -1,197 +1,61 @@
 # Interactive Shell MCP
 
-MCP server that provides interactive shell session management
-with full terminal emulation support via node-pty.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-green.svg)](https://nodejs.org)
+[![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
 
-## Overview
+MCP server for interactive shell sessions with TUI support. Gives AI agents persistent terminals, interactive prompt navigation, rendered screen reading, and output search.
 
-The Interactive Shell MCP (Model Context Protocol) server enables
-LLMs to create and manage interactive shell sessions. It provides
-persistent shell environments where commands can be executed
-sequentially while maintaining state, similar to how a human
-would use a terminal.
+## Demo
+
+| Without MCP | With MCP |
+|:-----------:|:--------:|
+| ![Without MCP](assets/without-mcp.gif) | ![With MCP](assets/with-mcp.gif) |
+| *"htop is interactive and can't run"* | *Launches htop, reads screen, extracts process data (2x speed)* |
+
+## Why This Exists
+
+Most AI coding tools run shell commands in isolation: each command starts a fresh shell, interactive prompts are impossible, and TUI apps just dump raw escape codes. This MCP server provides persistent PTY sessions with a virtual terminal emulator (`@xterm/headless`) so agents can maintain shell state, navigate interactive prompts with arrow keys, and read rendered terminal screens as clean text.
+
+**Three output modes:**
+
+| Mode | Best for | What you get |
+|------|----------|-------------|
+| **streaming** | Regular commands (ls, git, npm) | Raw sequential output, cleared after read |
+| **snapshot** | Live-updating apps (top, htop) | Current terminal buffer tail |
+| **screen** | TUI apps, prompts, anything visual | Rendered 2D text grid (what a human sees) |
+
+## Quick Start
+
+```bash
+git clone https://github.com/lightos/interactive-shell-mcp.git
+cd interactive-shell-mcp
+npm install && npm run build
+claude mcp add interactive-shell node dist/src/server.js
+```
+
+Then ask Claude: *"monitor htop and tell me what's using the most CPU"*
 
 ## Features
 
-- Create and manage multiple concurrent shell sessions
-- Full terminal emulation with proper TTY support via xterm.js
-- Persistent shell state across commands
-- Support for interactive programs (vim, nano, htop, etc.)
-- Cross-platform support (bash/zsh/fish on Unix/Linux/macOS,
-  PowerShell/cmd on Windows)
-- Shell allowlist for security (bash, zsh, fish, sh, dash, ksh,
-  powershell.exe, pwsh, cmd.exe)
-- Smart output handling with automatic mode detection
-- Three output modes: streaming, snapshot, and screen
-- Snapshot mode for continuously updating terminal applications
-- Screen mode with virtual terminal parsing for precise output reading
-- Raw input mode for interactive selection prompts
+- Rendered screen reading from TUI apps via `@xterm/headless`
+- `waitForIdle` across all read tools (no more guessing with sleep)
 - Screen search with text and regex pattern matching
-- Rectangular region extraction from terminal screen
-- Cursor position tracking
-- Terminal resize support
-- Configurable output size limits to prevent memory overflow
-- Automatic session cleanup after 10 minutes of inactivity
-- Process exit detection with exit code reporting
-- `waitForIdle` support across read and screen tools
-- Configurable working directory per session
+- Rectangular region extraction with row/col coordinates
+- Shell allowlist: bash, zsh, fish, sh, dash, ksh, powershell.exe, pwsh, cmd.exe
+- Auto-cleanup after 10min idle, exit code detection for 60s after process exit
+- Cross-platform: Unix/Linux/macOS + Windows
 
-## Available Tools
+## Use Cases
 
-### `start_shell_session`
-
-Spawns a new PTY shell with a virtual terminal emulator and
-returns a unique session ID.
-
-- **Parameters**:
-  - `cols` (number, optional): Terminal columns (default: 120, max: 500)
-  - `rows` (number, optional): Terminal rows (default: 40, max: 200)
-  - `shell` (string, optional): Shell to use. Allowed values:
-    bash, zsh, fish, sh, dash, ksh, powershell.exe, pwsh, cmd.exe.
-    Defaults to platform shell.
-  - `cwd` (string, optional): Working directory for the shell
-    (default: server process cwd)
-- **Output**: `{ sessionId, cols, rows }`
-
-### `send_shell_input`
-
-Writes input to the PTY. Appends a carriage return by default.
-Set `raw: true` for interactive prompts (arrow keys, space
-to toggle, etc.).
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell
-  - `input` (string, required): The input to send to the shell.
-    In raw mode, use escape sequences like `\x1b[A` (up),
-    `\x1b[B` (down), `\r` (enter), space for toggle
-  - `raw` (boolean, optional): Send input without appending
-    carriage return. Interprets escape sequences
-    (`\x1b`, `\r`, `\n`, `\t`, `\e`). Default: false
-- **Output**: Success confirmation
-
-### `read_shell_output`
-
-Returns output from the PTY process. Supports three modes:
-
-- **Streaming mode** (default): Returns buffered output since
-  last read and clears the buffer
-- **Snapshot mode**: Returns the current terminal screen state
-  without clearing (ideal for apps like top, htop, airodump-ng)
-- **Screen mode**: Returns parsed virtual terminal screen contents
-  with cursor position and buffer metadata
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell
-  - `mode` (string, optional): "streaming" (default), "snapshot",
-    or "screen"
-  - `maxBytes` (number, optional): Maximum bytes to return
-    (default: 100KB, max: 1MB)
-  - `snapshotSize` (number, optional): Size of the snapshot
-    buffer to capture (default: 50KB)
-  - `rows` (number, optional): Start row for screen mode
-    (0-based, inclusive)
-  - `rowEnd` (number, optional): End row for screen mode
-    (exclusive)
-  - `includeEmpty` (boolean, optional): Include empty trailing
-    lines in screen mode output (default: true)
-  - `trimWhitespace` (boolean, optional): Trim trailing whitespace
-    from each line in screen mode (default: false)
-  - `waitForIdle` (number, optional): Wait until PTY output is
-    idle for this many ms before reading. Max effective wait is
-    5000ms even if output keeps arriving.
-- **Output**:
-
-  ```json
-  {
-    "output": "string",
-    "metadata": {
-      "mode": "streaming|snapshot|screen",
-      "totalBytesReceived": 0,
-      "truncated": false,
-      "originalSize": 0,
-      "isSnapshot": false,
-      "snapshotTime": 0,
-      "cursor": { "x": 0, "y": 0 },
-      "rows": 40,
-      "cols": 120,
-      "isAlternateBuffer": false
-    }
-  }
-  ```
-
-### `get_screen_region`
-
-Extracts text from a rectangular region of the terminal screen.
-Coordinates are 0-based, end values are exclusive.
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell
-  - `startRow` (number, required): Start row (0-based, inclusive)
-  - `startCol` (number, required): Start column (0-based, inclusive)
-  - `endRow` (number, required): End row (exclusive)
-  - `endCol` (number, required): End column (exclusive)
-  - `trimWhitespace` (boolean, optional): Trim trailing whitespace
-    from each line (default: false)
-  - `waitForIdle` (number, optional): Wait until PTY output is
-    idle for this many ms before reading. Max 5000ms.
-- **Output**: `{ output, region: { startRow, startCol, endRow, endCol } }`
-
-### `get_screen_cursor`
-
-Returns the current cursor position and the text of the line
-the cursor is on. Lightweight alternative to reading the full screen.
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell
-  - `waitForIdle` (number, optional): Wait until PTY output is
-    idle for this many ms before reading. Max 5000ms.
-- **Output**: `{ cursor: { x, y }, currentLine, isAlternateBuffer }`
-
-### `search_screen`
-
-Search the terminal screen for text or regex pattern. Returns
-matching positions (capped at 50 results).
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell
-  - `pattern` (string, required): Text or regex pattern to search for
-  - `regex` (boolean, optional): Treat pattern as a regular
-    expression (default: false)
-  - `waitForIdle` (number, optional): Wait until PTY output is
-    idle for this many ms before reading. Max 5000ms.
-- **Output**: `{ results: [{ row, col, text }], count }`
-
-### `list_sessions`
-
-List all active shell sessions with their metadata.
-
-- **Parameters**: None
-- **Output**: `{ sessions: [{ sessionId, shell, cols, rows, isAlternateBuffer, idleSeconds }] }`
-
-### `resize_shell`
-
-Resize the terminal of an active shell session.
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell
-  - `cols` (number, required): New column count (1-500)
-  - `rows` (number, required): New row count (1-200)
-- **Output**: `{ cols, rows }`
-
-### `end_shell_session`
-
-Closes the PTY and cleans up resources.
-
-- **Parameters**:
-  - `sessionId` (string, required): The session ID of the shell to close
-- **Output**: Success confirmation
-
-## Installation
-
-```bash
-npm install
-npm run build
-```
+- **Interactive scaffolding & migrations**: `npx create-next-app`, `drizzle-kit push`, `prisma migrate`, `npm init`, or any inquirer/clack-based CLI
+- **System monitoring**: `htop`, `btop`, `top`, `iftop`, `duf` with process search and region extraction
+- **DevOps TUIs**: `lazydocker`, `lazygit`, `k9s`, `terraform console`
+- **Remote sessions**: `ssh` into servers, including nested TUI apps over SSH
+- **Database CLIs**: `psql`, `mysql`, `redis-cli`, `mongosh` in interactive mode
+- **Network tools**: `netcat`/`ncat`, `nmap`, `airodump-ng`, `tcpdump`
+- **REPLs & debuggers**: `python`, `node`, `irb`, `gdb`/`lldb`
+- **Text editors**: `vim`, `nano`, `emacs -nw`
 
 ## MCP Configuration
 
@@ -203,194 +67,201 @@ claude mcp add interactive-shell node /path/to/interactive-shell-mcp/dist/src/se
 
 ### Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows:
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
   "mcpServers": {
-    "Interactive Shell MCP": {
+    "interactive-shell": {
       "command": "node",
-      "args": [
-        "/path/to/interactive-shell-mcp/dist/src/server.js"
-      ]
+      "args": ["/path/to/interactive-shell-mcp/dist/src/server.js"]
     }
   }
 }
 ```
 
-### VS Code (Cursor)
+### VS Code / Cursor
 
-Add to `~/.cursor/mcp.json`:
+Add to your MCP settings (`.vscode/mcp.json` or `~/.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "Interactive Shell MCP": {
+    "interactive-shell": {
       "command": "node",
-      "args": [
-        "/path/to/interactive-shell-mcp/dist/src/server.js"
-      ]
+      "args": ["/path/to/interactive-shell-mcp/dist/src/server.js"]
     }
   }
 }
 ```
 
-Replace `/path/to/interactive-shell-mcp` with the actual path
-to your installation.
+## Tools Reference
+
+### `start_shell_session`
+
+Spawn a new PTY shell with a virtual terminal emulator.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `cols` | number | no | Terminal columns (default: 120, max: 500) |
+| `rows` | number | no | Terminal rows (default: 40, max: 200) |
+| `shell` | string | no | Shell to use (default: `$SHELL` or `bash`) |
+| `cwd` | string | no | Working directory (default: server cwd) |
+
+Returns `{ sessionId, cols, rows }`
+
+### `send_shell_input`
+
+Write input to the PTY. Appends carriage return by default.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
+| `input` | string | yes | Text to send. Raw mode: `\x1b[A` (up), `\x1b[B` (down), `\r` (enter) |
+| `raw` | boolean | no | Send without appending CR. Parses escape sequences. (default: false) |
+
+### `read_shell_output`
+
+Read output from the PTY. Three modes: streaming (default), snapshot, screen.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
+| `mode` | string | no | `"streaming"`, `"snapshot"`, or `"screen"` |
+| `waitForIdle` | number | no | Wait for N ms of silence before reading (max: 5000ms) |
+| `maxBytes` | number | no | Max bytes for streaming mode (default: 100KB) |
+| `snapshotSize` | number | no | Snapshot buffer size (default: 50KB) |
+| `rows` | number | no | Screen mode: start row (0-based) |
+| `rowEnd` | number | no | Screen mode: end row (exclusive) |
+| `includeEmpty` | boolean | no | Screen mode: include trailing empty lines (default: true) |
+| `trimWhitespace` | boolean | no | Screen mode: trim trailing whitespace per line (default: false) |
+
+Screen mode returns cursor position, terminal dimensions, and alternate buffer state in metadata.
+
+### `get_screen_region`
+
+Extract text from a rectangular region of the screen.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
+| `startRow` | number | yes | Start row (0-based, inclusive) |
+| `startCol` | number | yes | Start column (0-based, inclusive) |
+| `endRow` | number | yes | End row (exclusive) |
+| `endCol` | number | yes | End column (exclusive) |
+| `trimWhitespace` | boolean | no | Trim trailing whitespace per line (default: false) |
+| `waitForIdle` | number | no | Wait for N ms of silence before reading (max: 5000ms) |
+
+### `get_screen_cursor`
+
+Get cursor position and current line text.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
+| `waitForIdle` | number | no | Wait for N ms of silence before reading (max: 5000ms) |
+
+Returns `{ cursor: { x, y }, currentLine, isAlternateBuffer }`
+
+### `search_screen`
+
+Search the terminal screen for text or regex. Returns up to 50 matches.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
+| `pattern` | string | yes | Text or regex pattern |
+| `regex` | boolean | no | Treat pattern as regex (default: false) |
+| `waitForIdle` | number | no | Wait for N ms of silence before reading (max: 5000ms) |
+
+Returns `{ results: [{ row, col, text }], count }`
+
+### `list_sessions`
+
+List all active sessions with metadata. No parameters.
+
+Returns `{ sessions: [{ sessionId, shell, cols, rows, isAlternateBuffer, idleSeconds }] }`
+
+### `resize_shell`
+
+Resize an active session's terminal.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
+| `cols` | number | yes | New columns (1-500) |
+| `rows` | number | yes | New rows (1-200) |
+
+### `end_shell_session`
+
+Close the PTY and clean up resources.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | yes | Session ID |
 
 ## Usage Examples
 
-**Note:** The examples below demonstrate how an LLM would
-interact with this MCP server. These are not JavaScript code
-to be run directly, but rather illustrate the expected tool
-calling patterns.
+> These show the MCP tool call patterns for developers building integrations. End users just talk to their AI agent naturally.
 
-### Working with High-Output Commands
-
-When working with commands that produce large outputs or
-continuously refresh the screen (like `airodump-ng`, `htop`,
-`top`), use snapshot mode:
+### Reading a TUI App
 
 ```javascript
-// Start a session
-const { sessionId } = await start_shell_session();
-
-// Run airodump-ng
-await send_shell_input(sessionId, "sudo airodump-ng wlan0mon");
-
-// Read output in snapshot mode to get current screen state
-const result = await read_shell_output(sessionId, {
-  mode: "snapshot"
-});
-```
-
-### Handling Regular Commands
-
-For normal commands that produce streaming output:
-
-```javascript
-// Use default streaming mode
-const output = await read_shell_output(sessionId);
-
-// Or explicitly set a size limit for very large outputs
-const output = await read_shell_output(sessionId, {
-  maxBytes: 50000  // Return only last 50KB
-});
-```
-
-### Using Screen Mode
-
-For precise terminal screen reading with virtual terminal parsing:
-
-```javascript
-// Read the full parsed screen
-const screen = await read_shell_output(sessionId, {
+await send_shell_input(sessionId, "htop");
+const { output, metadata } = await read_shell_output(sessionId, {
   mode: "screen",
-  trimWhitespace: true,
-  includeEmpty: false
-});
-
-// Read specific rows
-const rows = await read_shell_output(sessionId, {
-  mode: "screen",
-  rows: 0,
-  rowEnd: 5
-});
-```
-
-### Interacting with Selection Prompts
-
-For interactive prompts (like `db:push`, inquirer, etc.):
-
-```javascript
-// Use raw mode to send arrow keys and enter
-await send_shell_input(sessionId, "\\x1b[B", { raw: true });
-await send_shell_input(sessionId, "\\r", { raw: true });
-```
-
-### Waiting for Output to Settle
-
-Use `waitForIdle` to wait until the PTY has stopped producing
-output before reading:
-
-```javascript
-// Wait up to 500ms of idle before reading
-const output = await read_shell_output(sessionId, {
   waitForIdle: 500
 });
+// output: rendered htop as clean text (CPU bars, process table, etc.)
+// metadata.isAlternateBuffer: true (htop uses alternate screen)
 
-// Also works with screen tools
-const cursor = await get_screen_cursor(sessionId, {
-  waitForIdle: 300
+// Extract just the process list (rows 6-30)
+const processes = await get_screen_region(sessionId, {
+  startRow: 6, startCol: 0, endRow: 30, endCol: 120,
+  trimWhitespace: true
 });
 ```
 
-### Searching the Screen
+### Navigating Interactive Prompts
 
 ```javascript
-// Text search
-const results = await search_screen(sessionId, {
-  pattern: "error"
-});
+// Send arrow keys and enter in raw mode
+await send_shell_input(sessionId, "\\x1b[B", { raw: true });  // down arrow
+await send_shell_input(sessionId, " ", { raw: true });         // space to select
+await send_shell_input(sessionId, "\\r", { raw: true });       // enter to confirm
 
-// Regex search
-const results = await search_screen(sessionId, {
-  pattern: "\\d+ files changed",
-  regex: true
+// Read what the prompt looks like now
+const screen = await read_shell_output(sessionId, {
+  mode: "screen", waitForIdle: 300
 });
 ```
 
-### Starting a Shell with Custom Options
+### Waiting for Command Output
 
 ```javascript
-// Start with specific shell and working directory
-const { sessionId } = await start_shell_session({
-  shell: "zsh",
-  cwd: "/home/user/project",
-  cols: 200,
-  rows: 50
+await send_shell_input(sessionId, "npm install");
+const output = await read_shell_output(sessionId, {
+  waitForIdle: 1000  // wait for 1s of silence
 });
 ```
 
-## Output Modes Explained
+### Searching for Content
 
-- **Streaming Mode**: Best for regular commands. Returns all
-  output since last read and clears the buffer. Default mode
-  for normal buffer.
-- **Snapshot Mode**: Best for continuously updating applications
-  (top, htop, airodump-ng). Returns the current terminal screen
-  state without clearing. Auto-detected when alternate screen
-  buffer is active or screen clears are detected.
-- **Screen Mode**: Returns parsed virtual terminal screen contents.
-  Provides cursor position, alternate buffer detection, and
-  supports row ranges, whitespace trimming, and empty line filtering.
-
-## Session Auto-Cleanup
-
-Sessions are automatically cleaned up after 10 minutes (600 seconds)
-of inactivity. The inactivity timer resets on any tool call that
-references the session. When a shell process exits, the exit code
-and signal are retained for 60 seconds so subsequent tool calls
-receive informative error messages instead of "Invalid session ID".
-
-## Shell Allowlist
-
-For security, only the following shells can be spawned:
-bash, zsh, fish, sh, dash, ksh, powershell.exe, pwsh, cmd.exe.
-If an unrecognized shell is requested, the platform default is used
-(SHELL environment variable on Unix, powershell.exe on Windows).
-
-## Debugging
-
-To run the server independently for debugging:
-
-```bash
-npm start
+```javascript
+// Find all error lines
+const errors = await search_screen(sessionId, {
+  pattern: "error|Error|ERROR",
+  regex: true,
+  waitForIdle: 500
+});
+// [{ row: 12, col: 0, text: "Error" }, ...]
 ```
 
-This will start the server on stdio, which is primarily useful
-for testing the installation and debugging issues.
+## Session Behavior
+
+- **Auto-cleanup**: Sessions idle >10 minutes are disposed automatically
+- **Exit detection**: When a shell exits, tools return `"Session exited with code N"` for 60 seconds instead of a generic invalid ID error
+- **Shell allowlist**: Only known shells can be spawned (bash, zsh, fish, sh, dash, ksh, powershell.exe, pwsh, cmd.exe). Unknown values fall back to platform default.
 
 ## License
 

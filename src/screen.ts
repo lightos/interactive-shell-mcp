@@ -97,23 +97,24 @@ export function searchScreen(terminal: Terminal, pattern: string, isRegex?: bool
     throw new Error(`Pattern too long: max ${MAX_PATTERN_LENGTH} characters`);
   }
 
-  const buffer = terminal.buffer.active;
-  const viewportStart = buffer.viewportY;
-  const results: SearchResult[] = [];
-
-  let regex: RegExp | null = null;
+  let regex: RegExp | undefined;
   if (isRegex) {
     try {
       regex = new RegExp(pattern, 'g');
-    } catch (e) {
+    } catch {
       throw new Error(`Invalid regex pattern: ${pattern}`);
     }
   }
+
+  const buffer = terminal.buffer.active;
+  const viewportStart = buffer.viewportY;
+  const results: SearchResult[] = [];
 
   for (let y = 0; y < terminal.rows && results.length < MAX_SEARCH_RESULTS; y++) {
     const line = buffer.getLine(viewportStart + y);
     if (!line) continue;
     const text = line.translateToString(true);
+
     if (regex) {
       regex.lastIndex = 0;
       let match;
@@ -129,6 +130,7 @@ export function searchScreen(terminal: Terminal, pattern: string, isRegex?: bool
       }
     }
   }
+
   return results;
 }
 

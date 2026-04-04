@@ -7,9 +7,10 @@ export const DEFAULT_ROWS = 40;
 export const ALLOWED_SHELLS = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'powershell.exe', 'pwsh', 'cmd.exe']);
 
 export function selectShell(shell?: string): string {
-  return shell && ALLOWED_SHELLS.has(shell)
-    ? shell
-    : (process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash'));
+  if (shell && ALLOWED_SHELLS.has(shell)) return shell;
+  if (process.platform === 'win32') return 'powershell.exe';
+  const envShell = process.env.SHELL;
+  return (envShell && ALLOWED_SHELLS.has(envShell)) ? envShell : 'bash';
 }
 
 export function isValidDimension(n: number): boolean {

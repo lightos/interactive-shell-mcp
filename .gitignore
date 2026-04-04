@@ -78,5 +78,8 @@ temp/
 # Worktrees
 .worktrees/
 
+# Source video recordings
+vids/
+
 # Internal planning artifacts
 docs/superpowers/

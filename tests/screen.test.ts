@@ -188,7 +188,6 @@ describe('searchScreen', () => {
 
   it('caps results at 50', async () => {
     const terminal = new Terminal({ cols: 80, rows: 60, allowProposedApi: true });
-    // Write 'x' repeated many times across multiple lines
     let data = '';
     for (let i = 0; i < 55; i++) {
       data += 'x\r\n';
