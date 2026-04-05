@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/lightos-interactive-shell-mcp-badge.png)](https://mseep.ai/app/lightos-interactive-shell-mcp)
+
 # Interactive Shell MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
